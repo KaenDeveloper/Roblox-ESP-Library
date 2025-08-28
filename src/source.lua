@@ -322,15 +322,15 @@ function ESPLibrary:UpdatePlayerESP(player)
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     local head = character:FindFirstChild("Head")
     
+    if not rootPart or not humanoid or not head then
+        self:RemoveESP(player)
+        return
+    end
+
     local distance = GetDistanceFromCamera(head.Position)
     if distance > self.Settings.RenderDistance then
          self:RemoveESP(player)
          return 
-    end
-    
-    if not rootPart or not humanoid or not head then
-        self:RemoveESP(player)
-        return
     end
     
     if not self.ESPObjects[player] then
@@ -491,4 +491,5 @@ function ESPLibrary:UpdateSettings(newSettings)
 end
 
 return ESPLibrary
+
 
