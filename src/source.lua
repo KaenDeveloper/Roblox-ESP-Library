@@ -195,7 +195,7 @@ function ESPLibrary:CreateESPObject(player)
     }
     
     if self.Settings.ChamsEnable then
-        espObject.Chams = self:CreateChams(player, player.Character)
+        espObject.Chams = self:CreateChams(player)
     end
     
     return espObject
@@ -489,5 +489,6 @@ function ESPLibrary:UpdateSettings(newSettings)
         end
     end
 end
+
 
 return ESPLibrary
