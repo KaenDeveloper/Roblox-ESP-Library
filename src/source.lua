@@ -8,12 +8,12 @@ local Workspace = cloneref(game:GetService("Workspace"))
 local LocalPlayer = Players.LocalPlayer
 local CurrentCamera = Workspace.CurrentCamera
 
-local math_abs = math.abs
-local math_clamp = math.clamp
-local Vector2_new = Vector2.new
-local Vector3_new = Vector3.new
-local Color3_new = Color3.new
-local Color3_fromRGB = Color3.fromRGB
+local CameraCache = {
+    position = Vector3.new(),
+    cframe = CFrame.new(),
+    fieldOfView = 70,
+    lastUpdate = 0
+}
 
 local JOINT_CONFIGS = {
     R15 = {
@@ -41,24 +41,63 @@ local JOINT_CONFIGS = {
     }
 }
 
+local LOD_LEVELS = {
+    HIGH = {
+        distance = 150,
+        updateRate = 1,
+        features = {
+            box = true,
+            healthBar = true,
+            nickname = true,
+            skeleton = true,
+            skeletonCircles = true,
+            chams = true
+        }
+    },
+    MEDIUM = {
+        distance = 250,
+        updateRate = 1, 
+        features = {
+            box = true,
+            healthBar = true,
+            nickname = true,
+            skeleton = false,
+            skeletonCircles = false,
+            chams = true
+        }
+    },
+    LOW = {
+        distance = 400,
+        updateRate = 2,
+        features = {
+            box = true,
+            healthBar = false,
+            nickname = true,
+            skeleton = false,
+            skeletonCircles = false,
+            chams = false
+        }
+    }
+}
+
 local DEFAULT_SETTINGS = {
     Enabled = true,
     BoxEnable = true,
     HealthBar = true,
     Nickname = true,
     Skeleton = false,
-    SkeletonCircles = false,
+    SkeletonCircles = false, --// Have FPS Issues
     ChamsEnable = true,
     
     -- Colors
-    NicknameColor = Color3_new(1, 1, 1),
-    SkeletonColor = Color3_new(1, 1, 1),
-    BoxColor = Color3_new(1, 1, 1),
-    ChamsColor = Color3_new(1, 1, 1),
-    ChamsOutlineColor = Color3_new(1, 1, 1),
-    OutlineColor = Color3_fromRGB(0, 0, 0),
-    HealthBarColor = Color3_fromRGB(0, 255, 0),
-    HealthBarOutlineColor = Color3_fromRGB(0, 0, 0),
+    NicknameColor = Color3.new(1, 1, 1),
+    SkeletonColor = Color3.new(1, 1, 1),
+    BoxColor = Color3.new(1, 1, 1),
+    ChamsColor = Color3.new(1, 1, 1),
+    ChamsOutlineColor = Color3.new(1, 1, 1),
+    OutlineColor = Color3.fromRGB(0, 0, 0),
+    HealthBarColor = Color3.fromRGB(0, 255, 0),
+    HealthBarOutlineColor = Color3.fromRGB(0, 0, 0),
     
     -- Dimensions
     BoxThickness = 2,
@@ -69,9 +108,11 @@ local DEFAULT_SETTINGS = {
     RenderDistance = 650,
     
     -- Performance settings
-    MaxCacheSize = 20,     --// Maximum cache
-    CleanupInterval = 20, --// Per 1min cleanup
-    MaxSkeletonParts = 20,  --// Maximum skeleton parts per player
+    MaxCacheSize = 20,           --// Maximum cache
+    CleanupInterval = 20,        --// Per 1min cleanup
+    MaxSkeletonParts = 20,       --// Maximum skeleton parts per player
+    CacheUpdateInterval = 0.016, --// 60fps cache updates
+    UseLOD = true,
 
     DeveloperMode = false
 }
@@ -83,13 +124,32 @@ local ESPObjectPool = {
     creationTimes = {}
 }
 
-local function WorldToViewportPoint(position)
-    local screenPosition, onScreen = CurrentCamera:WorldToViewportPoint(position)
-    return Vector2_new(screenPosition.X, screenPosition.Y), onScreen
+local PerformanceMetrics = {
+    frameCount = 0,
+    lastFPSCheck = 0,
+    currentFPS = 60,
+    adaptiveLOD = false
+}
+
+local function UpdateCameraCache()
+    local currentTime = tick()
+    if currentTime - CameraCache.lastUpdate >= DEFAULT_SETTINGS.CacheUpdateInterval then
+        CameraCache.position = CurrentCamera.CFrame.Position
+        CameraCache.cframe = CurrentCamera.CFrame
+        CameraCache.fieldOfView = CurrentCamera.FieldOfView
+        CameraCache.lastUpdate = currentTime
+    end
 end
 
-local function GetDistanceFromCamera(position)
-    return (position - CurrentCamera.CFrame.Position).Magnitude
+
+local function WorldToViewportPoint(position)
+    local screenPosition, onScreen = CurrentCamera:WorldToViewportPoint(position)
+    return Vector2.new(screenPosition.X, screenPosition.Y), onScreen
+end
+
+local function GetSquaredDistanceFromCamera(position)
+    local delta = position - CameraCache.position
+    return delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
 end
 
 local function CreateDrawing(drawingType, properties)
@@ -98,6 +158,32 @@ local function CreateDrawing(drawingType, properties)
         drawing[property] = value
     end
     return drawing
+end
+
+local function GetLODLevel(squaredDistance)
+    if squaredDistance <= LOD_LEVELS.HIGH.distance * LOD_LEVELS.HIGH.distance then
+        return LOD_LEVELS.HIGH, "HIGH"
+    elseif squaredDistance <= LOD_LEVELS.MEDIUM.distance * LOD_LEVELS.MEDIUM.distance then
+        return LOD_LEVELS.MEDIUM, "MEDIUM"
+    elseif squaredDistance <= LOD_LEVELS.LOW.distance * LOD_LEVELS.LOW.distance then
+        return LOD_LEVELS.LOW, "LOW"
+    else
+        return nil, "OUT_OF_RANGE"
+    end
+end
+
+local function UpdatePerformanceMetrics()
+    PerformanceMetrics.frameCount = PerformanceMetrics.frameCount + 1
+    local currentTime = tick()
+    
+    if currentTime - PerformanceMetrics.lastFPSCheck >= 1.0 then
+        PerformanceMetrics.currentFPS = PerformanceMetrics.frameCount / (currentTime - PerformanceMetrics.lastFPSCheck)
+        PerformanceMetrics.frameCount = 0
+        PerformanceMetrics.lastFPSCheck = currentTime
+        
+        -- Enable adaptive LOD if FPS drops below 30
+        PerformanceMetrics.adaptiveLOD = PerformanceMetrics.currentFPS < 30
+    end
 end
 
 function ESPObjectPool:Output(input)
@@ -162,14 +248,48 @@ end
 function ESPObjectPool:ForceCleanup()
     self:Output("[ESP Periodic Cleanup] ForceCleanup begin!")
     local currentTime = tick()
+    
     for poolKey, availableList in pairs(self.available) do
-        while #availableList > DEFAULT_SETTINGS.MaxCacheSize do
-            local oldDrawing = table.remove(availableList, 1)
-            if oldDrawing and oldDrawing.Destroy then
-                oldDrawing:Destroy()
+        if #availableList > DEFAULT_SETTINGS.MaxCacheSize then
+            local priorityList = {}
+            for i, drawing in ipairs(availableList) do
+                local age = currentTime - (self.creationTimes[drawing] or 0)
+                local usage = self.usageCount[drawing] or 0
+                local lastUse = currentTime - (self.lastUsed[drawing] or 0)
+                local priority = age * 0.4 + lastUse * 0.4 + (1 / (usage + 1)) * 0.2
+                
+                table.insert(priorityList, {
+                    drawing = drawing,
+                    priority = priority,
+                    index = i
+                })
             end
-            if self.creationTimes[oldDrawing] then
-                self.creationTimes[oldDrawing] = nil
+            
+            table.sort(priorityList, function(a, b) return a.priority > b.priority end)
+            
+            local toRemove = #availableList - DEFAULT_SETTINGS.MaxCacheSize
+            for i = 1, math.min(toRemove, #priorityList) do
+                local item = priorityList[i]
+                local drawing = item.drawing
+                
+                if self.creationTimes[drawing] then
+                    self.creationTimes[drawing] = nil
+                end
+                if self.usageCount[drawing] then
+                    self.usageCount[drawing] = nil
+                end
+                if self.lastUsed[drawing] then
+                    self.lastUsed[drawing] = nil
+                end
+                
+                for j = #availableList, 1, -1 do
+                    if availableList[j] == drawing then
+                        table.remove(availableList, j)
+                        break
+                    end
+                end
+                
+                drawing:Destroy()
             end
         end
     end
@@ -199,6 +319,7 @@ function ESPLibrary.new(settings)
     self.PlayerRemovingConnection = nil
     self.IsRunning = false
     self.LastPlayerCount = 0
+    self.FrameCounter = 0
     
     return self
 end
@@ -208,6 +329,8 @@ function ESPLibrary:CreateESPObject(player)
     
     local espObject = {
         Player = player,
+        LODLevel = "HIGH",
+        SquaredDistance = 0,
         Box = ESPObjectPool:GetDrawing("Square", {
             Thickness = self.Settings.BoxThickness,
             Color = self.Settings.BoxColor,
@@ -280,19 +403,52 @@ function ESPLibrary:GetHealthPercent(player, humanoid)
             local maxHealthValue = player.NRPBS.MaxHealth.Value
             return healthValue / maxHealthValue
         end)
-        return success and math_clamp(result, 0, 1) or 0
+        return success and math.clamp(result, 0, 1) or 0
     end
     
-    return math_clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
+    return math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
 end
 
-function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15)
+function ESPLibrary:CleanupSkeletonESP(espObject)
+    for i = 1, #espObject.Skeleton do
+        local line = espObject.Skeleton[i]
+        if line then
+            line.Visible = false
+            line.Transparency = 0
+            ESPObjectPool:ReturnDrawing("Line", line)
+        end
+    end
+    
+    for i = 1, #espObject.SkeletonCircles do
+        local circle = espObject.SkeletonCircles[i]
+        if circle then
+            circle.Visible = false
+            circle.Transparency = 0
+            ESPObjectPool:ReturnDrawing("Circle", circle)
+        end
+    end
+    
+    espObject.Skeleton = {}
+    espObject.SkeletonCircles = {}
+end
+
+function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15, lodFeatures)
+    if not lodFeatures.skeleton then 
+        if #espObject.Skeleton > 0 or #espObject.SkeletonCircles > 0 then
+            self:CleanupSkeletonESP(espObject)
+        end
+        return 
+    end
+    
     local joints = JOINT_CONFIGS[isR15 and "R15" or "R6"]
     local fixedRadius = 1
     
     local maxParts = math.min(#joints, self.Settings.MaxSkeletonParts)
+    
     for i = maxParts + 1, #espObject.Skeleton do
         if espObject.Skeleton[i] then
+            espObject.Skeleton[i].Visible = false
+            espObject.Skeleton[i].Transparency = 0
             ESPObjectPool:ReturnDrawing("Line", espObject.Skeleton[i])
             espObject.Skeleton[i] = nil
         end
@@ -300,6 +456,8 @@ function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15)
     
     for i = maxParts + 1, #espObject.SkeletonCircles do
         if espObject.SkeletonCircles[i] then
+            espObject.SkeletonCircles[i].Visible = false  
+            espObject.SkeletonCircles[i].Transparency = 0
             ESPObjectPool:ReturnDrawing("Circle", espObject.SkeletonCircles[i])
             espObject.SkeletonCircles[i] = nil
         end
@@ -322,17 +480,21 @@ function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15)
                         Thickness = self.Settings.LineThickness,
                         Color = self.Settings.SkeletonColor,
                         Transparency = 1,
+                        Visible = false
                     })
                 end
                 
                 local skeletonLine = espObject.Skeleton[index]
                 skeletonLine.From = posA
                 skeletonLine.To = posB
+                skeletonLine.Color = self.Settings.SkeletonColor
+                skeletonLine.Thickness = self.Settings.LineThickness
+                skeletonLine.Transparency = 1
                 skeletonLine.Visible = true
                 
-                if self.Settings.SkeletonCircles then
-                    local distance = GetDistanceFromCamera(partA.Position)
-                    local adjustedRadius = fixedRadius * (CurrentCamera.FieldOfView / distance + 2)
+                if self.Settings.SkeletonCircles and lodFeatures.skeletonCircles then
+                    local distance = math.sqrt(espObject.SquaredDistance)
+                    local adjustedRadius = math.max(1, fixedRadius * (CameraCache.fieldOfView / distance + 2))
                 
                     if not espObject.SkeletonCircles[index] then
                         espObject.SkeletonCircles[index] = ESPObjectPool:GetDrawing("Circle", {
@@ -340,14 +502,22 @@ function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15)
                             Color = self.Settings.SkeletonColor,
                             Transparency = 1,
                             Filled = true,
-                            ZIndex = 4
+                            ZIndex = 4,
+                            Visible = false
                         })
                     end
                 
                     local skeletonCircle = espObject.SkeletonCircles[index]
                     skeletonCircle.Radius = adjustedRadius
                     skeletonCircle.Position = posA
+                    skeletonCircle.Color = self.Settings.SkeletonColor
+                    skeletonCircle.Transparency = 1
                     skeletonCircle.Visible = true
+                else
+                    if espObject.SkeletonCircles[index] then
+                        espObject.SkeletonCircles[index].Visible = false
+                        espObject.SkeletonCircles[index].Transparency = 0
+                    end
                 end
             else
                 if espObject.Skeleton[index] then
@@ -384,8 +554,10 @@ function ESPLibrary:UpdatePlayerESP(player)
         return
     end
 
-    local distance = GetDistanceFromCamera(head.Position)
-    if distance > self.Settings.RenderDistance then
+    local squaredDistance = GetSquaredDistanceFromCamera(head.Position)
+    local maxSquaredDistance = self.Settings.RenderDistance * self.Settings.RenderDistance
+    
+    if squaredDistance > maxSquaredDistance then
          self:RemoveESP(player)
          return 
     end
@@ -395,22 +567,55 @@ function ESPLibrary:UpdatePlayerESP(player)
     end
     
     local espObject = self.ESPObjects[player]
+    espObject.SquaredDistance = squaredDistance
+    
+    --// LOD System
+    local lodLevel, lodName = nil, "OUT_OF_RANGE"
+    if self.Settings.UseLOD then
+        lodLevel, lodName = GetLODLevel(squaredDistance)
+        if not lodLevel then
+            self:RemoveESP(player)
+            return
+        end
+        
+        if PerformanceMetrics.adaptiveLOD then --// For really bad pc
+            if lodName == "HIGH" then
+                lodLevel = LOD_LEVELS.MEDIUM
+                lodName = "MEDIUM (ADAPTIVE)"
+            elseif lodName == "MEDIUM" then
+                lodLevel = LOD_LEVELS.LOW
+                lodName = "LOW (ADAPTIVE)"
+            end
+        end
+        
+        espObject.LODLevel = lodName
+        espObject.UpdateRate = lodLevel.updateRate
+    else --// Default
+        lodLevel = LOD_LEVELS.HIGH
+        lodName = "HIGH"
+        espObject.UpdateRate = 1
+    end
+    
+    if self.FrameCounter % espObject.UpdateRate ~= 0 then
+        return
+    end
+    
     local rootScreenPos, onScreen = WorldToViewportPoint(rootPart.Position)
     
     if onScreen and self.Settings.Enabled then
-        local headScreenPos = WorldToViewportPoint(head.Position + Vector3_new(0, 0.5, 0))
-        local rootBottomScreenPos = WorldToViewportPoint(rootPart.Position - Vector3_new(0, 3, 0))
+        local headScreenPos = WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+        local rootBottomScreenPos = WorldToViewportPoint(rootPart.Position - Vector3.new(0, 3, 0))
         
-        local boxHeight = math_abs(headScreenPos.Y - rootBottomScreenPos.Y)
+        local boxHeight = math.abs(headScreenPos.Y - rootBottomScreenPos.Y)
         local boxWidth = boxHeight / 2
-        local boxPosition = Vector2_new(rootScreenPos.X - boxWidth / 2, headScreenPos.Y)
+        local boxPosition = Vector2.new(rootScreenPos.X - boxWidth / 2, headScreenPos.Y)
         
-        if self.Settings.BoxEnable then
-            espObject.BoxOutline.Size = Vector2_new(boxWidth, boxHeight)
+        if self.Settings.BoxEnable and lodLevel.features.box then
+            espObject.BoxOutline.Size = Vector2.new(boxWidth, boxHeight)
             espObject.BoxOutline.Position = boxPosition
             espObject.BoxOutline.Visible = true
             
-            espObject.Box.Size = Vector2_new(boxWidth, boxHeight)
+            espObject.Box.Size = Vector2.new(boxWidth, boxHeight)
             espObject.Box.Position = boxPosition
             espObject.Box.Visible = true
         else
@@ -418,32 +623,32 @@ function ESPLibrary:UpdatePlayerESP(player)
             espObject.BoxOutline.Visible = false
         end
         
-        if self.Settings.HealthBar then
+        if self.Settings.HealthBar and lodLevel.features.healthBar then
             local healthPercent = self:GetHealthPercent(player, humanoid)
-            local healthBarPosition = Vector2_new(rootScreenPos.X - boxWidth / 2 - 8, headScreenPos.Y)
+            local healthBarPosition = Vector2.new(rootScreenPos.X - boxWidth / 2 - 8, headScreenPos.Y)
             
-            espObject.HealthBarOutline.Size = Vector2_new(5, boxHeight)
+            espObject.HealthBarOutline.Size = Vector2.new(5, boxHeight)
             espObject.HealthBarOutline.Position = healthBarPosition
             espObject.HealthBarOutline.Visible = true
             
-            espObject.HealthBar.Size = Vector2_new(5, boxHeight * healthPercent)
-            espObject.HealthBar.Position = Vector2_new(healthBarPosition.X, headScreenPos.Y + boxHeight * (1 - healthPercent))
-            espObject.HealthBar.Color = Color3_fromRGB((1 - healthPercent) * 255, healthPercent * 255, 0)
+            espObject.HealthBar.Size = Vector2.new(5, boxHeight * healthPercent)
+            espObject.HealthBar.Position = Vector2.new(healthBarPosition.X, headScreenPos.Y + boxHeight * (1 - healthPercent))
+            espObject.HealthBar.Color = Color3.fromRGB((1 - healthPercent) * 255, healthPercent * 255, 0)
             espObject.HealthBar.Visible = true
         else
             espObject.HealthBar.Visible = false
             espObject.HealthBarOutline.Visible = false
         end
         
-        if self.Settings.Nickname then
+        if self.Settings.Nickname and lodLevel.features.nickname then
             espObject.Nickname.Text = player.Name
-            espObject.Nickname.Position = Vector2_new(rootScreenPos.X, headScreenPos.Y - 20)
+            espObject.Nickname.Position = Vector2.new(rootScreenPos.X, headScreenPos.Y - 20)
             espObject.Nickname.Visible = true
         else
             espObject.Nickname.Visible = false
         end
-        
-        if espObject.Chams and self.Settings.ChamsEnable then
+
+        if espObject.Chams and self.Settings.ChamsEnable and lodLevel.features.chams then
             espObject.Chams.FillTransparency = 0.0
             espObject.Chams.OutlineTransparency = 0.0
         elseif espObject.Chams then
@@ -453,8 +658,10 @@ function ESPLibrary:UpdatePlayerESP(player)
         
         if self.Settings.Skeleton then
             local isR15 = humanoid.RigType == Enum.HumanoidRigType.R15
-            self:UpdateSkeletonESP(espObject, character, isR15)
+            self:UpdateSkeletonESP(espObject, character, isR15, lodLevel.features)
         end
+        
+        espObject.LastUpdate = tick()
     else
         self:HideESPElements(espObject)
     end
@@ -467,12 +674,20 @@ function ESPLibrary:HideESPElements(espObject)
     espObject.HealthBarOutline.Visible = false
     espObject.Nickname.Visible = false
     
-    for _, line in pairs(espObject.Skeleton) do
-        if line then line.Visible = false end
+    for i = 1, #espObject.Skeleton do
+        local line = espObject.Skeleton[i]
+        if line then 
+            line.Visible = false
+            line.Transparency = 0
+        end
     end
     
-    for _, circle in pairs(espObject.SkeletonCircles) do
-        if circle then circle.Visible = false end
+    for i = 1, #espObject.SkeletonCircles do
+        local circle = espObject.SkeletonCircles[i]
+        if circle then 
+            circle.Visible = false
+            circle.Transparency = 0
+        end
     end
 end
 
@@ -502,6 +717,10 @@ function ESPLibrary:RemoveESP(player)
 end
 
 function ESPLibrary:UpdateAllESP()
+    UpdateCameraCache()
+    UpdatePerformanceMetrics()
+    
+    self.FrameCounter = (self.FrameCounter + 1) % 1000000
     ESPObjectPool:PeriodicCleanup()
     local currentPlayerCount = #Players:GetPlayers()
 
