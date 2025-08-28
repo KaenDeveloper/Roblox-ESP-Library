@@ -490,5 +490,5 @@ function ESPLibrary:UpdateSettings(newSettings)
     end
 end
 
-
 return ESPLibrary
+
