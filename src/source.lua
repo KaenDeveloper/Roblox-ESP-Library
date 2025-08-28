@@ -44,11 +44,11 @@ local JOINT_CONFIGS = {
 local DEFAULT_SETTINGS = {
     Enabled = true,
     BoxEnable = true,
-    ChamsEnable = true,
     HealthBar = true,
     Nickname = true,
     Skeleton = false,
     SkeletonCircles = false,
+    ChamsEnable = true,
     
     -- Colors
     NicknameColor = Color3_new(1, 1, 1),
@@ -66,12 +66,21 @@ local DEFAULT_SETTINGS = {
     HealthBarlineThickness = 2,
     HealthBarOutlineThickness = 3,
     TextSize = 19,
-    RenderDistance = 600
+    RenderDistance = 650,
+    
+    -- Performance settings
+    MaxCacheSize = 20,     --// Maximum cache
+    CleanupInterval = 20, --// Per 1min cleanup
+    MaxSkeletonParts = 20,  --// Maximum skeleton parts per player
+
+    DeveloperMode = false
 }
 
 local ESPObjectPool = {
     available = {},
-    inUse = {}
+    inUse = {},
+    lastCleanup = 0,
+    creationTimes = {}
 }
 
 local function WorldToViewportPoint(position)
@@ -91,8 +100,14 @@ local function CreateDrawing(drawingType, properties)
     return drawing
 end
 
-function ESPObjectPool:GetDrawing(drawingType, properties)
+function ESPObjectPool:Output(input)
+   if DEFAULT_SETTINGS.DeveloperMode then warn(input) end
+end
+
+function ESPObjectPool:GetDrawing(drawingType, properties, maxCacheSize)
     local poolKey = drawingType
+    maxCacheSize = maxCacheSize or DEFAULT_SETTINGS.MaxCacheSize
+    
     if not self.available[poolKey] then
         self.available[poolKey] = {}
     end
@@ -100,6 +115,7 @@ function ESPObjectPool:GetDrawing(drawingType, properties)
     local drawing = table.remove(self.available[poolKey])
     if not drawing then
         drawing = CreateDrawing(drawingType, properties)
+        self.creationTimes[drawing] = tick()
     else
         for property, value in pairs(properties) do
             drawing[property] = value
@@ -115,8 +131,11 @@ function ESPObjectPool:GetDrawing(drawingType, properties)
 end
 
 function ESPObjectPool:ReturnDrawing(drawingType, drawing)
+    if not drawing then return end
+    
     drawing.Visible = false
     local poolKey = drawingType
+    
     if not self.available[poolKey] then
         self.available[poolKey] = {}
     end
@@ -130,9 +149,41 @@ function ESPObjectPool:ReturnDrawing(drawingType, drawing)
         end
     end
     
-    table.insert(self.available[poolKey], drawing)
+    if #self.available[poolKey] >= DEFAULT_SETTINGS.MaxCacheSize then
+        if self.creationTimes[drawing] then
+            self.creationTimes[drawing] = nil
+        end
+        drawing:Destroy()
+    else
+        table.insert(self.available[poolKey], drawing)
+    end
 end
 
+function ESPObjectPool:ForceCleanup()
+    self:Output("[ESP Periodic Cleanup] ForceCleanup begin!")
+    local currentTime = tick()
+    for poolKey, availableList in pairs(self.available) do
+        while #availableList > DEFAULT_SETTINGS.MaxCacheSize do
+            local oldDrawing = table.remove(availableList, 1)
+            if oldDrawing and oldDrawing.Destroy then
+                oldDrawing:Destroy()
+            end
+            if self.creationTimes[oldDrawing] then
+                self.creationTimes[oldDrawing] = nil
+            end
+        end
+    end
+
+    self.lastCleanup = currentTime
+end
+
+function ESPObjectPool:PeriodicCleanup()
+    local currentTime = tick()
+    if currentTime - self.lastCleanup > DEFAULT_SETTINGS.CleanupInterval then
+        self:Output("[ESP Periodic Cleanup] Starting scheduled cleanup...")
+        self:ForceCleanup()
+    end
+end
 
 function ESPLibrary.new(settings)
     local self = setmetatable({}, ESPLibrary)
@@ -144,7 +195,10 @@ function ESPLibrary.new(settings)
     
     self.ESPObjects = {}
     self.UpdateConnection = nil
+    self.CleanupConnection = nil
+    self.PlayerRemovingConnection = nil
     self.IsRunning = false
+    self.LastPlayerCount = 0
     
     return self
 end
@@ -218,7 +272,6 @@ function ESPLibrary:CreateChams(player)
     return highlight
 end
 
-
 function ESPLibrary:GetHealthPercent(player, humanoid)
     -- Arsenal-specific health calculation
     if game.PlaceId == 286090429 then
@@ -237,21 +290,25 @@ function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15)
     local joints = JOINT_CONFIGS[isR15 and "R15" or "R6"]
     local fixedRadius = 1
     
-    -- Clear existing skeleton elements that are no longer valid
-    for i = #espObject.Skeleton, 1, -1 do
-        if i > #joints then
-            if espObject.Skeleton[i] then
-                ESPObjectPool:ReturnDrawing("Line", espObject.Skeleton[i])
-                espObject.Skeleton[i] = nil
-            end
-            if espObject.SkeletonCircles[i] then
-                ESPObjectPool:ReturnDrawing("Circle", espObject.SkeletonCircles[i])
-                espObject.SkeletonCircles[i] = nil
-            end
+    local maxParts = math.min(#joints, self.Settings.MaxSkeletonParts)
+    for i = maxParts + 1, #espObject.Skeleton do
+        if espObject.Skeleton[i] then
+            ESPObjectPool:ReturnDrawing("Line", espObject.Skeleton[i])
+            espObject.Skeleton[i] = nil
         end
     end
     
-    for index, joint in ipairs(joints) do
+    for i = maxParts + 1, #espObject.SkeletonCircles do
+        if espObject.SkeletonCircles[i] then
+            ESPObjectPool:ReturnDrawing("Circle", espObject.SkeletonCircles[i])
+            espObject.SkeletonCircles[i] = nil
+        end
+    end
+    
+    for index = 1, maxParts do
+        local joint = joints[index]
+        if not joint then break end
+        
         local partA = character:FindFirstChild(joint[1])
         local partB = character:FindFirstChild(joint[2])
         
@@ -445,6 +502,20 @@ function ESPLibrary:RemoveESP(player)
 end
 
 function ESPLibrary:UpdateAllESP()
+    ESPObjectPool:PeriodicCleanup()
+    local currentPlayerCount = #Players:GetPlayers()
+
+    -- Force cleanup if player count changed significantly
+   if math.abs(currentPlayerCount - self.LastPlayerCount) > 5 then
+        ESPObjectPool:Output(string.format(
+            "[ESP Player Count Change] Player count changed from %d to %d, triggering cleanup...",
+            self.LastPlayerCount,
+            currentPlayerCount
+        ))
+        ESPObjectPool:ForceCleanup()
+        self.LastPlayerCount = currentPlayerCount
+    end
+    
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
             self:UpdatePlayerESP(player)
@@ -458,8 +529,19 @@ function ESPLibrary:Start()
     if self.IsRunning then return end    
 
     self.IsRunning = true    
-    self.PlayerRemovingConnection = Players.PlayerRemoving:Connect(function(player) self:RemoveESP(player) end)
-    self.UpdateConnection = RunService.Heartbeat:Connect(function() self:UpdateAllESP() end)
+    self.PlayerRemovingConnection = Players.PlayerRemoving:Connect(function(player) 
+        self:RemoveESP(player) 
+    end)
+    
+    self.UpdateConnection = RunService.Heartbeat:Connect(function() 
+        self:UpdateAllESP() 
+    end)
+    
+    self.CleanupConnection = RunService.Heartbeat:Connect(function()
+        if tick() % 30 < 0.1 then 
+            ESPObjectPool:ForceCleanup()
+        end
+    end)
 end
 
 function ESPLibrary:Stop()
@@ -472,6 +554,11 @@ function ESPLibrary:Stop()
         self.UpdateConnection = nil
     end
     
+    if self.CleanupConnection then
+        self.CleanupConnection:Disconnect()
+        self.CleanupConnection = nil
+    end
+    
     if self.PlayerRemovingConnection then
         self.PlayerRemovingConnection:Disconnect()
         self.PlayerRemovingConnection = nil
@@ -480,6 +567,8 @@ function ESPLibrary:Stop()
     for player, _ in pairs(self.ESPObjects) do
         self:RemoveESP(player)
     end
+    
+    ESPObjectPool:ForceCleanup()
 end
 
 function ESPLibrary:UpdateSettings(newSettings)
@@ -490,6 +579,8 @@ function ESPLibrary:UpdateSettings(newSettings)
     end
 end
 
+function ESPLibrary:ForceCleanup()
+    ESPObjectPool:ForceCleanup()
+end
+
 return ESPLibrary
-
-
