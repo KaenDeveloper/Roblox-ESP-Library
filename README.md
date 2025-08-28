@@ -56,3 +56,8 @@ All settings can be found and modified in example.lua.
 
 ## Preview
 ![Preview](https://raw.githubusercontent.com/KaenDeveloper/Roblox-ESP-Library/main/example/preview.png)
+
+## License
+
+This project is licensed under the MIT License.
+You are free to use, modify, and distribute this code as long as the original license notice is included.
