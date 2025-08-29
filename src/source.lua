@@ -50,7 +50,6 @@ local LOD_LEVELS = {
             healthBar = true,
             nickname = true,
             skeleton = true,
-            skeletonCircles = true,
             chams = true
         }
     },
@@ -62,7 +61,6 @@ local LOD_LEVELS = {
             healthBar = true,
             nickname = true,
             skeleton = false,
-            skeletonCircles = false,
             chams = true
         }
     },
@@ -74,7 +72,6 @@ local LOD_LEVELS = {
             healthBar = false,
             nickname = true,
             skeleton = false,
-            skeletonCircles = false,
             chams = false
         }
     }
@@ -86,8 +83,7 @@ local DEFAULT_SETTINGS = {
     HealthBar = true,
     Nickname = true,
     Skeleton = false,
-    SkeletonCircles = false, --// Have FPS Issues
-    ChamsEnable = true,
+    ChamsEnable = false,
     
     -- Colors
     NicknameColor = Color3.new(1, 1, 1),
@@ -114,7 +110,7 @@ local DEFAULT_SETTINGS = {
     CacheUpdateInterval = 0.016, --// 60fps cache updates
     UseLOD = true,
 
-    DeveloperMode = false
+    DeveloperMode = true
 }
 
 local ESPObjectPool = {
@@ -131,16 +127,17 @@ local PerformanceMetrics = {
     adaptiveLOD = false
 }
 
+local lastCamCFrame = nil
 local function UpdateCameraCache()
     local currentTime = tick()
-    if currentTime - CameraCache.lastUpdate >= DEFAULT_SETTINGS.CacheUpdateInterval then
+    local camCFrame = CurrentCamera.CFrame
+    if currentTime - CameraCache.lastUpdate >= DEFAULT_SETTINGS.CacheUpdateInterval and camCFrame ~= lastCamCFrame then
         CameraCache.position = CurrentCamera.CFrame.Position
-        CameraCache.cframe = CurrentCamera.CFrame
+        CameraCache.cframe = camCFrame 
         CameraCache.fieldOfView = CurrentCamera.FieldOfView
         CameraCache.lastUpdate = currentTime
     end
 end
-
 
 local function WorldToViewportPoint(position)
     local screenPosition, onScreen = CurrentCamera:WorldToViewportPoint(position)
@@ -193,7 +190,7 @@ end
 function ESPObjectPool:GetDrawing(drawingType, properties, maxCacheSize)
     local poolKey = drawingType
     maxCacheSize = maxCacheSize or DEFAULT_SETTINGS.MaxCacheSize
-    
+ 
     if not self.available[poolKey] then
         self.available[poolKey] = {}
     end
@@ -248,47 +245,37 @@ end
 function ESPObjectPool:ForceCleanup()
     self:Output("[ESP Periodic Cleanup] ForceCleanup begin!")
     local currentTime = tick()
-    
+
     for poolKey, availableList in pairs(self.available) do
         if #availableList > DEFAULT_SETTINGS.MaxCacheSize then
             local priorityList = {}
             for i, drawing in ipairs(availableList) do
                 local age = currentTime - (self.creationTimes[drawing] or 0)
-                local usage = self.usageCount[drawing] or 0
-                local lastUse = currentTime - (self.lastUsed[drawing] or 0)
-                local priority = age * 0.4 + lastUse * 0.4 + (1 / (usage + 1)) * 0.2
-                
+                local priority = age
+
                 table.insert(priorityList, {
                     drawing = drawing,
                     priority = priority,
                     index = i
                 })
             end
-            
+
             table.sort(priorityList, function(a, b) return a.priority > b.priority end)
-            
+
             local toRemove = #availableList - DEFAULT_SETTINGS.MaxCacheSize
             for i = 1, math.min(toRemove, #priorityList) do
                 local item = priorityList[i]
                 local drawing = item.drawing
-                
-                if self.creationTimes[drawing] then
-                    self.creationTimes[drawing] = nil
-                end
-                if self.usageCount[drawing] then
-                    self.usageCount[drawing] = nil
-                end
-                if self.lastUsed[drawing] then
-                    self.lastUsed[drawing] = nil
-                end
-                
+
+                self.creationTimes[drawing] = nil
+
                 for j = #availableList, 1, -1 do
                     if availableList[j] == drawing then
                         table.remove(availableList, j)
                         break
                     end
                 end
-                
+
                 drawing:Destroy()
             end
         end
@@ -367,7 +354,6 @@ function ESPLibrary:CreateESPObject(player)
             ZIndex = 3
         }),
         Skeleton = {},
-        SkeletonCircles = {},
         Chams = nil
     }
     
@@ -419,17 +405,7 @@ function ESPLibrary:CleanupSkeletonESP(espObject)
         end
     end
     
-    for i = 1, #espObject.SkeletonCircles do
-        local circle = espObject.SkeletonCircles[i]
-        if circle then
-            circle.Visible = false
-            circle.Transparency = 0
-            ESPObjectPool:ReturnDrawing("Circle", circle)
-        end
-    end
-    
     espObject.Skeleton = {}
-    espObject.SkeletonCircles = {}
 end
 
 function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15, lodFeatures)
@@ -441,8 +417,6 @@ function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15, lodFeatures)
     end
     
     local joints = JOINT_CONFIGS[isR15 and "R15" or "R6"]
-    local fixedRadius = 1
-    
     local maxParts = math.min(#joints, self.Settings.MaxSkeletonParts)
     
     for i = maxParts + 1, #espObject.Skeleton do
@@ -451,15 +425,6 @@ function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15, lodFeatures)
             espObject.Skeleton[i].Transparency = 0
             ESPObjectPool:ReturnDrawing("Line", espObject.Skeleton[i])
             espObject.Skeleton[i] = nil
-        end
-    end
-    
-    for i = maxParts + 1, #espObject.SkeletonCircles do
-        if espObject.SkeletonCircles[i] then
-            espObject.SkeletonCircles[i].Visible = false  
-            espObject.SkeletonCircles[i].Transparency = 0
-            ESPObjectPool:ReturnDrawing("Circle", espObject.SkeletonCircles[i])
-            espObject.SkeletonCircles[i] = nil
         end
     end
     
@@ -490,49 +455,15 @@ function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15, lodFeatures)
                 skeletonLine.Color = self.Settings.SkeletonColor
                 skeletonLine.Thickness = self.Settings.LineThickness
                 skeletonLine.Transparency = 1
-                skeletonLine.Visible = true
-                
-                if self.Settings.SkeletonCircles and lodFeatures.skeletonCircles then
-                    local distance = math.sqrt(espObject.SquaredDistance)
-                    local adjustedRadius = math.max(1, fixedRadius * (CameraCache.fieldOfView / distance + 2))
-                
-                    if not espObject.SkeletonCircles[index] then
-                        espObject.SkeletonCircles[index] = ESPObjectPool:GetDrawing("Circle", {
-                            Radius = adjustedRadius,
-                            Color = self.Settings.SkeletonColor,
-                            Transparency = 1,
-                            Filled = true,
-                            ZIndex = 4,
-                            Visible = false
-                        })
-                    end
-                
-                    local skeletonCircle = espObject.SkeletonCircles[index]
-                    skeletonCircle.Radius = adjustedRadius
-                    skeletonCircle.Position = posA
-                    skeletonCircle.Color = self.Settings.SkeletonColor
-                    skeletonCircle.Transparency = 1
-                    skeletonCircle.Visible = true
-                else
-                    if espObject.SkeletonCircles[index] then
-                        espObject.SkeletonCircles[index].Visible = false
-                        espObject.SkeletonCircles[index].Transparency = 0
-                    end
-                end
+                skeletonLine.Visible = true       
             else
-                if espObject.Skeleton[index] then
+                if espObject.Skeleton[index] and espObject.Skeleton[index].Visible then
                     espObject.Skeleton[index].Visible = false
-                end
-                if espObject.SkeletonCircles[index] then
-                    espObject.SkeletonCircles[index].Visible = false
                 end
             end
         else
-            if espObject.Skeleton[index] then
+            if espObject.Skeleton[index] and espObject.Skeleton[index].Visible then
                 espObject.Skeleton[index].Visible = false
-            end
-            if espObject.SkeletonCircles[index] then
-                espObject.SkeletonCircles[index].Visible = false
             end
         end
     end
@@ -633,7 +564,7 @@ function ESPLibrary:UpdatePlayerESP(player)
             
             espObject.HealthBar.Size = Vector2.new(5, boxHeight * healthPercent)
             espObject.HealthBar.Position = Vector2.new(healthBarPosition.X, headScreenPos.Y + boxHeight * (1 - healthPercent))
-            espObject.HealthBar.Color = Color3.fromRGB((1 - healthPercent) * 255, healthPercent * 255, 0)
+            espObject.HealthBar.Color = Color3.fromHSV(healthPercent * 0.33, 1, 1)
             espObject.HealthBar.Visible = true
         else
             espObject.HealthBar.Visible = false
@@ -681,14 +612,6 @@ function ESPLibrary:HideESPElements(espObject)
             line.Transparency = 0
         end
     end
-    
-    for i = 1, #espObject.SkeletonCircles do
-        local circle = espObject.SkeletonCircles[i]
-        if circle then 
-            circle.Visible = false
-            circle.Transparency = 0
-        end
-    end
 end
 
 function ESPLibrary:RemoveESP(player)
@@ -705,10 +628,6 @@ function ESPLibrary:RemoveESP(player)
         if line then ESPObjectPool:ReturnDrawing("Line", line) end
     end
     
-    for _, circle in pairs(espObject.SkeletonCircles) do
-        if circle then ESPObjectPool:ReturnDrawing("Circle", circle) end
-    end
-    
     if espObject.Chams then
         espObject.Chams:Destroy()
     end
@@ -720,7 +639,7 @@ function ESPLibrary:UpdateAllESP()
     UpdateCameraCache()
     UpdatePerformanceMetrics()
     
-    self.FrameCounter = (self.FrameCounter + 1) % 1000000
+    self.FrameCounter += 1
     ESPObjectPool:PeriodicCleanup()
     local currentPlayerCount = #Players:GetPlayers()
 
@@ -757,7 +676,7 @@ function ESPLibrary:Start()
     end)
     
     self.CleanupConnection = RunService.Heartbeat:Connect(function()
-        if tick() % 30 < 0.1 then 
+        if tick() - ESPObjectPool.lastCleanup > 30 then 
             ESPObjectPool:ForceCleanup()
         end
     end)
