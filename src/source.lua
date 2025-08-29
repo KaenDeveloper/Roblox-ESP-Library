@@ -410,7 +410,7 @@ end
 
 function ESPLibrary:UpdateSkeletonESP(espObject, character, isR15, lodFeatures)
     if not lodFeatures.skeleton then 
-        if #espObject.Skeleton > 0 or #espObject.SkeletonCircles > 0 then
+        if #espObject.Skeleton > 0 then
             self:CleanupSkeletonESP(espObject)
         end
         return 
