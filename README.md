@@ -17,7 +17,6 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/KaenDeveloper/Roblox-
 - Health Bar – displays player health status
 - Nickname – shows player usernames above their character
 - Skeleton – draws character skeletons (optional)
-- Skeleton Circles – optional joint circles
 - Chams – highlights characters through objects
 - Optimized Drawing Pool – reduces unnecessary Drawing object creation
 - Fully Configurable – customize colors, thickness, text size, and render distance
@@ -30,7 +29,6 @@ ESP:UpdateSettings({
     HealthBar = true,
     Nickname = true,
     Skeleton = true,
-    SkeletonCircles = false,
     ChamsEnable = true,
     
     -- Colors
