@@ -110,7 +110,7 @@ local DEFAULT_SETTINGS = {
     CacheUpdateInterval = 0.016, --// 60fps cache updates
     UseLOD = true,
 
-    DeveloperMode = true
+    DeveloperMode = false
 }
 
 local ESPObjectPool = {
@@ -720,5 +720,6 @@ end
 function ESPLibrary:ForceCleanup()
     ESPObjectPool:ForceCleanup()
 end
+
 
 return ESPLibrary
