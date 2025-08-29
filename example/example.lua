@@ -9,7 +9,6 @@ ESP:UpdateSettings({
     HealthBar = true,
     Nickname = true,
     Skeleton = false,
-    SkeletonCircles = false,
     ChamsEnable = false,
     
     -- Colors
@@ -31,3 +30,4 @@ ESP:UpdateSettings({
     RenderDistance = 650
 })
 ESP:Start()
+
